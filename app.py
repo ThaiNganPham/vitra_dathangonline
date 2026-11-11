@@ -3,14 +3,12 @@ import io
 import json
 import os
 import re
-import sqlite3
-import uuid
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import pandas as pd
 import streamlit as st
+import requests
 
 st.set_page_config(page_title='Vị Trà | Đặt nước', page_icon='🍃', layout='centered')
 st.markdown('''<style>
@@ -27,44 +25,32 @@ def secret(key, default=''):
     try:return st.secrets.get(key, default)
     except Exception:return os.environ.get(key,default)
 
-def sheets():
-    if not secret('GOOGLE_SHEET_ID'):return None
-    import gspread
-    from google.oauth2.service_account import Credentials
-    creds=Credentials.from_service_account_info(dict(st.secrets['gcp_service_account']),scopes=['https://www.googleapis.com/auth/spreadsheets'])
-    return gspread.authorize(creds).open_by_key(secret('GOOGLE_SHEET_ID'))
-
-def conn():
-    c=sqlite3.connect(ROOT/'orders_local.db',timeout=15)
-    c.execute('CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, created_at TEXT, customer TEXT, phone TEXT, method TEXT, address TEXT, payment TEXT, note TEXT, items TEXT, subtotal INTEGER, shipping INTEGER, total INTEGER, status TEXT)')
-    c.commit();return c
-
-COLS=['id','created_at','customer','phone','method','address','payment','note','items','subtotal','shipping','total','status']
-
 def save_order(order):
-    sh=sheets()
-    if sh:
-        try:ws=sh.worksheet('Orders')
-        except Exception:ws=sh.add_worksheet(title='Orders',rows=1000,cols=13);ws.append_row(COLS)
-        ws.append_row([order.get(k,'') for k in COLS],value_input_option='RAW')
-    else:
-        with conn() as c:c.execute('INSERT INTO orders VALUES ('+','.join('?'*len(COLS))+')',[order.get(k,'') for k in COLS])
-
-def get_orders():
-    sh=sheets()
-    if sh:
-        try:return sh.worksheet('Orders').get_all_records()
-        except Exception:return []
-    with conn() as c:return [dict(zip(COLS,r)) for r in c.execute('SELECT * FROM orders ORDER BY created_at DESC').fetchall()]
-
-def set_status(order_id,status):
-    sh=sheets()
-    if sh:
-        ws=sh.worksheet('Orders'); cell=ws.find(order_id,in_column=1)
-        if not cell:raise ValueError('Không tìm thấy đơn')
-        ws.update_cell(cell.row,13,status)
-    else:
-        with conn() as c:c.execute('UPDATE orders SET status=? WHERE id=?',(status,order_id))
+    """Send order to Apps Script. Never silently fall back to ephemeral local storage."""
+    url = secret('APPS_SCRIPT_URL')
+    token = secret('ORDER_SECRET')
+    if not url or not token:
+        raise RuntimeError('Thiếu APPS_SCRIPT_URL hoặc ORDER_SECRET trong Streamlit Secrets')
+    payload = {
+        'secret': token,
+        'items': [{'name': item['name'], 'quantity': item['qty'], 'price': item['price']}
+                  for item in json.loads(order['items'])],
+        'delivery_type': order['method'],
+        'address': order['address'],
+        'customer_name': order['customer'],
+        'phone': order['phone'],
+        'payment_method': order['payment'],
+        'note': order['note'],
+    }
+    response = requests.post(url, json=payload, timeout=25, allow_redirects=True)
+    response.raise_for_status()
+    try:
+        result = response.json()
+    except ValueError:
+        raise RuntimeError('Apps Script không trả về JSON. Kiểm tra quyền Anyone và URL /exec')
+    if result.get('success') is not True or not result.get('orderNo'):
+        raise RuntimeError('Apps Script từ chối lưu đơn: ' + str(result.get('error', 'Không rõ lỗi')))
+    return str(result['orderNo'])
 
 @st.cache_data(ttl=30)
 def menu():
@@ -80,41 +66,8 @@ def vnd(n):return f'{int(n):,}'.replace(',','.')+'đ'
 
 def admin():
     st.title('📋 Quản lý đơn hàng')
-    password=secret('ADMIN_PASSWORD')
-    if not password:
-        st.error('Chưa cấu hình ADMIN_PASSWORD trong Streamlit Secrets.');return
-    if not st.session_state.get('admin_ok'):
-        with st.form('login'):
-            p=st.text_input('Mật khẩu quản trị',type='password')
-            if st.form_submit_button('Đăng nhập'):
-                import hmac
-                if hmac.compare_digest(p,password):st.session_state.admin_ok=True;st.rerun()
-                else:st.error('Sai mật khẩu')
-        return
-    if st.button('Đăng xuất'):st.session_state.admin_ok=False;st.rerun()
-    a,b=st.tabs(['Đơn hàng','Menu và giá'])
-    with a:
-        if st.button('🔄 Làm mới'):st.rerun()
-        orders=get_orders()
-        if not orders:st.info('Chưa có đơn hàng')
-        for o in sorted(orders,key=lambda x:str(x['created_at']),reverse=True):
-            with st.expander(f"{o['id']} · {o['customer']} · {vnd(o['total'])} · {o['status']}"):
-                st.write(f"🕒 {o['created_at']} | 📞 {o['phone']}")
-                st.write(f"Nhận hàng: {o['method']} · {o['address']}")
-                st.write(f"Thanh toán: {o['payment']} · Phí giao: {vnd(o['shipping'])}")
-                st.write(f"Ghi chú: {o['note'] or 'Không có'}")
-                for item in json.loads(o['items']):st.write(f"• {item['name']} × {item['qty']} — {vnd(item['price']*item['qty'])}")
-                ix=STATUS.index(o['status']) if o['status'] in STATUS else 0
-                status=st.selectbox('Trạng thái',STATUS,index=ix,key='status_'+o['id'])
-                if st.button('Lưu trạng thái',key='save_'+o['id']):
-                    try:set_status(o['id'],status);st.success('Đã cập nhật');st.rerun()
-                    except Exception as e:st.error(f'Lỗi cập nhật: {e}')
-    with b:
-        st.warning('Menu lưu trong menu.csv. Trên Streamlit Cloud, chỉnh sửa tại GitHub để thay đổi được giữ lâu dài.')
-        df=pd.read_csv(ROOT/'menu.csv',dtype=str,keep_default_na=False)
-        edited=st.data_editor(df,hide_index=True,num_rows='fixed',use_container_width=True)
-        st.download_button('Tải menu.csv đã chỉnh',edited.to_csv(index=False).encode('utf-8-sig'),'menu.csv','text/csv')
-        st.caption('Điền giá bằng VND (ví dụ 35000). Món chưa có giá sẽ không hiện cho khách. Đặt available = 0 để ẩn món.')
+    st.info('Đơn hàng được lưu trong tab Orders của Google Sheets. Mở Google Sheets để xem và cập nhật trạng thái đơn.')
+    st.caption('Trang quản trị đồng bộ trạng thái trực tiếp sẽ được bổ sung ở phiên bản tiếp theo.')
 
 def customer():
     st.title('🍃 VỊ TRÀ')
@@ -166,18 +119,16 @@ def customer():
             st.error('Vui lòng nhập địa chỉ giao hàng đầy đủ.');return
         if not st.session_state.cart or subtotal<=0:st.error('Giỏ hàng trống.');return
         order={
-            'id':'VT-'+datetime.now(TZ).strftime('%y%m%d')+'-'+uuid.uuid4().hex[:6].upper(),
-            'created_at':datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S'),
             'customer':name.strip(),'phone':re.sub(r'[\s.-]','',phone),
             'method':method,'address':address.strip(),'payment':payment,'note':note.strip(),
-            'items':json.dumps([{'id':x['id'],'name':x['name'],'price':x['price'],'qty':q} for x,q in selected],ensure_ascii=False),
-            'subtotal':subtotal,'shipping':0,'total':subtotal,'status':'Mới'}
+            'items':json.dumps([{'id':x['id'],'name':x['name'],'price':x['price'],'qty':q} for x,q in selected],ensure_ascii=False)}
         try:
-            save_order(order)
-        except Exception as e:
-            st.error('Chưa gửi được đơn. Vui lòng thử lại hoặc liên hệ quán.');return
+            order_no = save_order(order)
+        except Exception:
+            st.error('Không lưu được đơn vào Google Sheets. Vui lòng liên hệ quán hoặc thử lại. Không đặt lại nhiều lần nếu chưa kiểm tra Sheets.')
+            return
         st.session_state.cart={}
-        st.success(f"Đã gửi đơn {order['id']}! Vị Trà sẽ liên hệ xác nhận.")
+        st.success(f'Đã gửi đơn {order_no}! Vị Trà sẽ liên hệ xác nhận.')
         if method=='Giao tận nơi':st.info('Phí giao hàng sẽ được quán thông báo khi xác nhận. Tổng tiền hiện tại chưa gồm phí giao.')
         if payment=='Chuyển khoản':st.info('Vui lòng đợi quán xác nhận số tiền và thông tin chuyển khoản trước khi thanh toán.')
 
