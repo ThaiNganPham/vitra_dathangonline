@@ -1,8 +1,8 @@
 ﻿id,group,name,price,available
-1,PHIN,Cà phê sữa,,1
-2,PHIN,Cà phê đen,,1
+1,PHIN,Cà phê sữa,39000,1
+2,PHIN,Cà phê đen,35000,1
 3,PHIN,Bạc xỉu,,1
-4,PHIN,Cà phê yến mạch,,1
+4,PHIN,Cà phê yến mạch,59000,1
 5,PHIN,Matcha soda xoài,,1
 6,MATCHA,Matcha oolong nhài “mây”,,1
 7,MATCHA,Matcha dưa hấu,,1
