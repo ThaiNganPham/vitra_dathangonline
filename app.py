@@ -25,32 +25,83 @@ def secret(key, default=''):
     try:return st.secrets.get(key, default)
     except Exception:return os.environ.get(key,default)
 
+
 def save_order(order):
-    """Send order to Apps Script. Never silently fall back to ephemeral local storage."""
-    url = secret('APPS_SCRIPT_URL')
-    token = secret('ORDER_SECRET')
+    """Gửi đơn hàng Vị Trà đến Google Apps Script."""
+    import logging
+
+    logger = logging.getLogger("vitra")
+
+    url = secret("APPS_SCRIPT_URL")
+    token = secret("ORDER_SECRET")
+
     if not url or not token:
-        raise RuntimeError('Thiếu APPS_SCRIPT_URL hoặc ORDER_SECRET trong Streamlit Secrets')
+        raise RuntimeError("Thiếu cấu hình Streamlit Secrets")
+
+    items = json.loads(order["items"])
+
     payload = {
-        'secret': token,
-        'items': [{'name': item['name'], 'quantity': item['qty'], 'price': item['price']}
-                  for item in json.loads(order['items'])],
-        'delivery_type': order['method'],
-        'address': order['address'],
-        'customer_name': order['customer'],
-        'phone': order['phone'],
-        'payment_method': order['payment'],
-        'note': order['note'],
+        "secret": token,
+        "items": [
+            {
+                "name": item["name"],
+                "quantity": item["qty"],
+                "price": item["price"]
+            }
+            for item in items
+        ],
+        "delivery_type": order["method"],
+        "address": order["address"],
+        "customer_name": order["customer"],
+        "phone": order["phone"],
+        "payment_method": order["payment"],
+        "note": order["note"]
     }
-    response = requests.post(url, json=payload, timeout=25, allow_redirects=True)
-    response.raise_for_status()
+
+    logger.warning("ViTra: Starting POST request")
+
     try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=25,
+            allow_redirects=True
+        )
+
+        logger.warning(
+            "ViTra: HTTP=%s, Content-Type=%s, Redirects=%s",
+            response.status_code,
+            response.headers.get("Content-Type"),
+            len(response.history)
+        )
+
+        response.raise_for_status()
+
         result = response.json()
+
+        if result.get("success") is not True:
+            raise RuntimeError(
+                "Apps Script error: " +
+                str(result.get("error", "Unknown error"))
+            )
+
+        if not result.get("orderNo"):
+            raise RuntimeError("Apps Script không trả về mã đơn")
+
+        logger.warning("ViTra: Order saved successfully")
+
+        return str(result["orderNo"])
+
+    except requests.exceptions.RequestException as e:
+        logger.error(
+            "ViTra: Request failed: %s",
+            type(e).__name__
+        )
+        raise
+
     except ValueError:
-        raise RuntimeError('Apps Script không trả về JSON. Kiểm tra quyền Anyone và URL /exec')
-    if result.get('success') is not True or not result.get('orderNo'):
-        raise RuntimeError('Apps Script từ chối lưu đơn: ' + str(result.get('error', 'Không rõ lỗi')))
-    return str(result['orderNo'])
+        logger.error("ViTra: Invalid JSON response")
+        raise RuntimeError("Apps Script không trả về JSON hợp lệ")
 
 @st.cache_data(ttl=30)
 def menu():
