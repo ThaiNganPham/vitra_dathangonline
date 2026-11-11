@@ -177,8 +177,10 @@ def customer():
             order_no = save_order(order)
         except Exception:
             st.error(
-                'Không lưu được đơn vào Google Sheets.Vui lòng đừng đặt lại tại không có lưu.\n'
-                NÓI CHỨ MỚI LÀM TỚI ĐÂY À')
+                'Không lưu được đơn vào Google Sheets.  \n'
+                'Vui lòng đừng đặt lại vì đơn chưa được lưu.  \n'
+                'NÓI CHỨ MỚI LÀM TỚI ĐÂY À'
+            )
             return
         st.session_state.cart={}
         st.success(f'Đã gửi đơn {order_no}! Vị Trà sẽ liên hệ xác nhận.')
